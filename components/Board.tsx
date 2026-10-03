@@ -1,64 +1,84 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
+import Comments from "./Comments";
 
 type Post = {
-  id: number;
+  id: string;
   category: string;
   title: string;
   content: string;
   author: string;
-  createdAt: string;
+  created_at: string;
 };
 
-// 데이터를 저장하지 않으므로 예시 글만 메모리에 올려둔다. 새로고침하면 초기화된다.
-const INITIAL_POSTS: Post[] = [
-  {
-    id: 2,
-    category: "Q&A",
-    title: "수강 기간 연장은 어떻게 하나요?",
-    content: "수강 기간이 곧 끝나는데 연장 신청 방법이 궁금합니다.",
-    author: "익명",
-    createdAt: "2026-10-02 15:20",
-  },
-  {
-    id: 1,
-    category: "Q&A",
-    title: "강의 영상은 몇 번까지 볼 수 있나요?",
-    content: "수강 기간 안에서는 횟수 제한 없이 볼 수 있는지 궁금해요.",
-    author: "익명",
-    createdAt: "2026-10-01 10:05",
-  },
-];
-
-function now() {
-  const d = new Date();
+function formatDate(iso: string) {
+  const d = new Date(iso);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 export default function Board() {
-  const [posts, setPosts] = useState<Post[]>(INITIAL_POSTS);
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [writing, setWriting] = useState(false);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  const [openId, setOpenId] = useState<number | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [aiWaiting, setAiWaiting] = useState<Set<string>>(new Set());
 
-  function submit(e: React.FormEvent) {
+  async function load() {
+    const { data, error } = await supabase
+      .from("posts")
+      .select("id, category, title, content, author, created_at")
+      .eq("category", "Q&A")
+      .order("created_at", { ascending: false });
+    if (error) setError("글 목록을 불러오지 못했습니다.");
+    else {
+      setError("");
+      setPosts(data);
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim() || !content.trim()) return;
-    const next: Post = {
-      id: Math.max(0, ...posts.map((p) => p.id)) + 1,
-      category: "Q&A",
-      title: title.trim(),
-      content: content.trim(),
-      author: "익명",
-      createdAt: now(),
-    };
-    setPosts([next, ...posts]);
+    const { data, error } = await supabase
+      .from("posts")
+      .insert({ category: "Q&A", title: title.trim(), content: content.trim(), author: "익명" })
+      .select("id")
+      .single();
+    if (error) {
+      setError("글을 등록하지 못했습니다.");
+      return;
+    }
     setTitle("");
     setContent("");
     setWriting(false);
+    await load();
+    requestAiComment(data.id);
+  }
+
+  // AI 댓글은 시간이 걸리므로 기다리지 않고 백그라운드로 요청한 뒤 끝나면 목록을 다시 불러온다.
+  async function requestAiComment(postId: string) {
+    setAiWaiting((s) => new Set(s).add(postId));
+    await fetch("/api/ai-comment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ postId }),
+    }).catch(() => {});
+    setAiWaiting((s) => {
+      const next = new Set(s);
+      next.delete(postId);
+      return next;
+    });
   }
 
   return (
@@ -125,28 +145,31 @@ export default function Board() {
             </tr>
           </thead>
           <tbody>
-            {posts.length === 0 && (
+            {(loading || posts.length === 0) && (
               <tr>
                 <td colSpan={5} className="empty">
-                  아직 글이 없습니다.
+                  {loading ? "불러오는 중..." : "아직 글이 없습니다."}
                 </td>
               </tr>
             )}
-            {posts.map((p) => (
+            {posts.map((p, i) => (
               <Fragment key={p.id}>
                 <tr
                   className="row"
                   onClick={() => setOpenId(openId === p.id ? null : p.id)}
                 >
-                  <td className="c-no">{p.id}</td>
+                  <td className="c-no">{posts.length - i}</td>
                   <td className="c-cat">[{p.category}]</td>
                   <td className="c-title">{p.title}</td>
                   <td className="c-author">{p.author}</td>
-                  <td className="c-date">{p.createdAt}</td>
+                  <td className="c-date">{formatDate(p.created_at)}</td>
                 </tr>
                 {openId === p.id && (
                   <tr className="detail">
-                    <td colSpan={5}>{p.content}</td>
+                    <td colSpan={5}>
+                      <div className="post-content">{p.content}</div>
+                      <Comments postId={p.id} aiWaiting={aiWaiting.has(p.id)} />
+                    </td>
                   </tr>
                 )}
               </Fragment>
@@ -154,7 +177,7 @@ export default function Board() {
           </tbody>
         </table>
 
-        <p className="note">※ 작성한 글은 저장되지 않으며 새로고침하면 사라집니다.</p>
+        {error && <p className="note error">{error}</p>}
       </div>
     </main>
   );
